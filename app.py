@@ -1,8 +1,10 @@
+import base64
 import os
 import re
 from io import BytesIO
 
 import pandas as pd
+import requests
 import streamlit as st
 import textstat
 
@@ -51,7 +53,55 @@ st.write("Upload PDF, DOCX, or PPTX files for automated analysis. Set GOOGLE_API
 # TEXT EXTRACTION
 # =========================
 
+def get_secret(key):
+    value = os.getenv(key)
+    if value:
+        return value
+    try:
+        return st.secrets.get(key)
+    except Exception:
+        return None
+
+
+def get_vision_api_key():
+    return get_secret("GOOGLE_CLOUD_VISION_API_KEY") or get_secret("GOOGLE_API_KEY")
+
+
+def vision_ocr_image_to_text(image, api_key):
+    try:
+        buffered = BytesIO()
+        image.save(buffered, format="PNG")
+        img_bytes = buffered.getvalue()
+        img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+
+        url = f"https://vision.googleapis.com/v1/images:annotate?key={api_key}"
+        payload = {
+            "requests": [
+                {
+                    "image": {"content": img_b64},
+                    "features": [{"type": "DOCUMENT_TEXT_DETECTION"}]
+                }
+            ]
+        }
+        response = requests.post(url, json=payload, timeout=30)
+        if response.status_code != 200:
+            return ""
+        data = response.json()
+        text = ""
+        for item in data.get("responses", []):
+            text += item.get("fullTextAnnotation", {}).get("text", "")
+        return text.strip()
+    except Exception:
+        return ""
+
+
 def ocr_image_to_text(image):
+    api_key = get_vision_api_key()
+    if api_key:
+        cloud_text = vision_ocr_image_to_text(image, api_key)
+        if cloud_text:
+            return cloud_text
+
     if pytesseract is None:
         return ""
     try:
@@ -261,9 +311,9 @@ def generate_ai_suggestions(text, results):
     if genai is None:
         return ["Install the google-generativeai package and add it to requirements for Gemini suggestions."]
 
-    api_key = os.getenv("GOOGLE_API_KEY")
+    api_key = get_secret("GOOGLE_API_KEY")
     if not api_key:
-        return ["Set the GOOGLE_API_KEY environment variable to enable Gemini suggestions."]
+        return ["Set the GOOGLE_API_KEY environment variable or Streamlit secret to enable Gemini suggestions."]
 
     try:
         genai.configure(api_key=api_key)
@@ -284,7 +334,7 @@ def generate_ai_suggestions(text, results):
             "If this is a DOCX or PDF file, mention the page or section where the issue occurs."
         )
 
-        model = os.getenv("GOOGLE_GEMINI_MODEL", "gemini-flash-latest")
+        model = get_secret("GOOGLE_GEMINI_MODEL") or "gemini-flash-latest"
         try:
             # The installed `google.generativeai` package exposes a
             # `GenerativeModel` -> `start_chat()` -> `send_message()` API.
