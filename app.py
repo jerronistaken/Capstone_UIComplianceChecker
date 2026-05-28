@@ -391,7 +391,9 @@ def generate_ai_suggestions(text, results, structured_text=None):
             f"Document context: {results.get('Document Context', 'No context available')}\n"
             "Use the labeled text above to identify where each issue occurs. "
             "For PPTX, cite slide numbers. For PDF, cite page numbers. For DOCX, cite headings or sections. "
-            "Do not only give a list of fixes in order; instead, assign each issue to a location."
+            "Provide inline correction examples, using quotes for the original text and the corrected text. "
+            "For example: Change \"the following section\" to \"The following section\" in Slide 1. "
+            "Do not only give a list of fixes in order; instead, assign each issue to a specific location."
         )
 
         model = get_secret("GOOGLE_GEMINI_MODEL") or "gemini-flash-latest"
