@@ -2,7 +2,7 @@ streamlit
 pandas
 openpyxl
 python-docx
-PyPDF2
+pypdf
 language-tool-python
 textstat
 python-pptx
