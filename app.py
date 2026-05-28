@@ -1,5 +1,7 @@
 import os
 import re
+from io import BytesIO
+
 import pandas as pd
 import streamlit as st
 import textstat
@@ -8,6 +10,12 @@ try:
     import google.generativeai as genai
 except ImportError:
     genai = None
+
+from PIL import Image
+try:
+    import pytesseract
+except ImportError:
+    pytesseract = None
 
 from docx import Document
 from pypdf import PdfReader
@@ -37,24 +45,76 @@ st.write("Upload PDF, DOCX, or PPTX files for automated analysis. Set GOOGLE_API
 # TEXT EXTRACTION
 # =========================
 
+def ocr_image_to_text(image):
+    if pytesseract is None:
+        return ""
+    try:
+        return pytesseract.image_to_string(image).strip()
+    except Exception:
+        return ""
+
+
+def extract_images_from_docx(doc):
+    images = []
+    for rel in doc.part.rels.values():
+        reltype = getattr(rel, "reltype", "")
+        if "image" not in str(reltype).lower():
+            continue
+        target_part = getattr(rel, "target_part", None)
+        blob = getattr(target_part, "blob", None)
+        if not blob:
+            continue
+        try:
+            images.append(Image.open(BytesIO(blob)))
+        except Exception:
+            continue
+    return images
+
+
 def extract_text_from_docx(file):
     doc = Document(file)
-    return "\n".join([para.text for para in doc.paragraphs])
+    text = "\n".join([para.text for para in doc.paragraphs])
+
+    ocr_texts = []
+    for image in extract_images_from_docx(doc):
+        image_text = ocr_image_to_text(image)
+        if image_text:
+            ocr_texts.append(image_text)
+
+    if ocr_texts:
+        text += "\n" + "\n".join(ocr_texts)
+    return text
 
 
 def extract_text_from_pdf(file):
     reader = PdfReader(file)
-    text = ""
+    text_chunks = []
+    ocr_texts = []
+
     for page in reader.pages:
         extracted = page.extract_text()
         if extracted:
-            text += extracted + "\n"
-    return text
+            text_chunks.append(extracted)
+
+        for image_file in getattr(page, "images", []):
+            try:
+                image = image_file.image if getattr(image_file, "image", None) is not None else Image.open(BytesIO(image_file.data))
+            except Exception:
+                continue
+            image_text = ocr_image_to_text(image)
+            if image_text:
+                ocr_texts.append(image_text)
+
+    if ocr_texts:
+        text_chunks.append("\n".join(ocr_texts))
+    return "\n".join(text_chunks)
 
 
 def extract_text_from_pptx(file):
     presentation = Presentation(file)
     text_chunks = []
+    ocr_texts = []
+
     for slide in presentation.slides:
         for shape in slide.shapes:
             if hasattr(shape, "has_text_frame") and shape.has_text_frame and shape.text:
@@ -64,6 +124,18 @@ def extract_text_from_pptx(file):
                     for cell in row.cells:
                         if cell.text:
                             text_chunks.append(cell.text)
+
+            if hasattr(shape, "image") and getattr(shape, "image") is not None:
+                try:
+                    image = Image.open(BytesIO(shape.image.blob))
+                    image_text = ocr_image_to_text(image)
+                    if image_text:
+                        ocr_texts.append(image_text)
+                except Exception:
+                    continue
+
+    if ocr_texts:
+        text_chunks.append("\n".join(ocr_texts))
     return "\n".join(text_chunks)
 
 
