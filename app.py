@@ -14,7 +14,12 @@ except ImportError:
 from PIL import Image
 try:
     import pytesseract
+    tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    if os.path.exists(tesseract_path):
+        pytesseract.pytesseract.tesseract_cmd = tesseract_path
 except ImportError:
+    pytesseract = None
+except Exception:
     pytesseract = None
 
 from docx import Document
@@ -22,6 +27,7 @@ from pypdf import PdfReader
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 # =========================
 # CONFIG (inline)
@@ -110,6 +116,31 @@ def extract_text_from_pdf(file):
     return "\n".join(text_chunks)
 
 
+def extract_images_from_pptx(presentation):
+    images = []
+
+    def collect_images(shape):
+        if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+            try:
+                images.append(Image.open(BytesIO(shape.image.blob)))
+            except Exception:
+                pass
+        elif shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+            for child in shape.shapes:
+                collect_images(child)
+        elif hasattr(shape, "has_table") and shape.has_table:
+            for row in shape.table.rows:
+                for cell in row.cells:
+                    for cell_shape in cell.shapes:
+                        collect_images(cell_shape)
+
+    for slide in presentation.slides:
+        for shape in slide.shapes:
+            collect_images(shape)
+
+    return images
+
+
 def extract_text_from_pptx(file):
     presentation = Presentation(file)
     text_chunks = []
@@ -125,18 +156,76 @@ def extract_text_from_pptx(file):
                         if cell.text:
                             text_chunks.append(cell.text)
 
-            if hasattr(shape, "image") and getattr(shape, "image") is not None:
-                try:
-                    image = Image.open(BytesIO(shape.image.blob))
-                    image_text = ocr_image_to_text(image)
-                    if image_text:
-                        ocr_texts.append(image_text)
-                except Exception:
-                    continue
+    for image in extract_images_from_pptx(presentation):
+        image_text = ocr_image_to_text(image)
+        if image_text:
+            ocr_texts.append(image_text)
 
     if ocr_texts:
         text_chunks.append("\n".join(ocr_texts))
     return "\n".join(text_chunks)
+
+
+def extract_docx_section_hints(file):
+    doc = Document(file)
+    sections = []
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+        style_name = getattr(getattr(para, "style", None), "name", "")
+        if "Heading" in style_name or text.isupper() or text.endswith(":"):
+            sections.append(text if len(text) <= 80 else text[:77] + "...")
+        if len(sections) >= 5:
+            break
+
+    if not sections:
+        for para in doc.paragraphs:
+            text = para.text.strip()
+            if text:
+                sections.append(text if len(text) <= 80 else text[:77] + "...")
+            if len(sections) >= 3:
+                break
+
+    if not sections:
+        return "Document has no obvious headings or section markers."
+
+    return "Sections: " + " | ".join(sections)
+
+
+def extract_pdf_page_hints(file):
+    reader = PdfReader(file)
+    pages = []
+    for i, page in enumerate(reader.pages, start=1):
+        extracted = page.extract_text()
+        if not extracted:
+            pages.append(f"Page {i}: no extractable text")
+        else:
+            snippet = " ".join(extracted.strip().split())
+            pages.append(f"Page {i}: {snippet[:100]}{'...' if len(snippet) > 100 else ''}")
+        if len(pages) >= 5:
+            break
+
+    return " | ".join(pages)
+
+
+def extract_pptx_slide_hints(file):
+    presentation = Presentation(file)
+    slides = []
+    for i, slide in enumerate(presentation.slides, start=1):
+        slide_text = []
+        for shape in slide.shapes:
+            if hasattr(shape, "has_text_frame") and shape.has_text_frame and shape.text:
+                slide_text.append(shape.text.strip().replace("\n", " "))
+        if slide_text:
+            snippet = " ".join(slide_text)[:120]
+            slides.append(f"Slide {i}: {snippet}{'...' if len(slide_text) > 0 and len(snippet) == 120 else ''}")
+        else:
+            slides.append(f"Slide {i}: no visible text; may contain images")
+        if len(slides) >= 5:
+            break
+
+    return " | ".join(slides)
 
 
 def check_bullet_formatting(text):
@@ -189,7 +278,10 @@ def generate_ai_suggestions(text, results):
             f"Grammar issues: {results['Grammar Issues']}\n"
             f"Readability score: {results['Readability Score']}\n"
             f"Average sentence length: {results['Average Sentence Length']}\n"
-            f"Bullet formatting issues: {results.get('Bullet Formatting Details')}"
+            f"Bullet formatting issues: {results.get('Bullet Formatting Details')}\n\n"
+            f"Document context: {results.get('Document Context', 'No context available')}\n"
+            "If this is a PPTX file, mention the slide number for each recommendation. "
+            "If this is a DOCX or PDF file, mention the page or section where the issue occurs."
         )
 
         model = os.getenv("GOOGLE_GEMINI_MODEL", "gemini-flash-latest")
@@ -369,16 +461,23 @@ if uploaded_files:
         try:
             if extension == 'docx':
                 text = extract_text_from_docx(uploaded_file)
+                uploaded_file.seek(0)
+                location_hints = extract_docx_section_hints(uploaded_file)
             elif extension == 'pdf':
                 text = extract_text_from_pdf(uploaded_file)
+                uploaded_file.seek(0)
+                location_hints = extract_pdf_page_hints(uploaded_file)
             elif extension == 'pptx':
                 text = extract_text_from_pptx(uploaded_file)
+                uploaded_file.seek(0)
+                location_hints = extract_pptx_slide_hints(uploaded_file)
             else:
                 st.warning(f"Unsupported file: {filename}")
                 continue
 
             bullet_issues = check_bullet_formatting(text)
             results = {
+                'Document Context': location_hints,
                 'Document Name': filename,
                 'Word Count': len(text.split()),
                 'Missing Brand Keywords': check_brand_keywords(text),
