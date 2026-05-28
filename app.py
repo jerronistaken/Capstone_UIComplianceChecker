@@ -216,6 +216,65 @@ def extract_text_from_pptx(file):
     return "\n".join(text_chunks)
 
 
+def extract_structured_text_from_docx(file):
+    doc = Document(file)
+    sections = []
+    current = "Document"
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+        style_name = getattr(getattr(para, "style", None), "name", "")
+        if "Heading" in style_name or text.isupper() or text.endswith(":"):
+            current = text if len(text) <= 80 else text[:77] + "..."
+            sections.append(f"SECTION: {current}")
+        else:
+            if not sections:
+                sections.append("SECTION: Document")
+            sections[-1] += "\n" + text
+
+    if not sections:
+        return "Document has no extractable headings."
+    return "\n\n".join(sections)
+
+
+def extract_structured_text_from_pdf(file):
+    reader = PdfReader(file)
+    pages = []
+    for i, page in enumerate(reader.pages, start=1):
+        extracted = page.extract_text()
+        if not extracted:
+            pages.append(f"PAGE {i}: no extractable text")
+        else:
+            pages.append(f"PAGE {i}:\n{extracted.strip()}")
+        if len(pages) >= 10:
+            break
+    return "\n\n".join(pages)
+
+
+def extract_structured_text_from_pptx(file):
+    presentation = Presentation(file)
+    slides = []
+    for i, slide in enumerate(presentation.slides, start=1):
+        slide_text = []
+        for shape in slide.shapes:
+            if hasattr(shape, "has_text_frame") and shape.has_text_frame and shape.text:
+                slide_text.append(shape.text.strip().replace("\n", " "))
+            elif hasattr(shape, "has_table") and shape.has_table:
+                for row in shape.table.rows:
+                    for cell in row.cells:
+                        if cell.text:
+                            slide_text.append(cell.text.strip().replace("\n", " "))
+        if slide_text:
+            snippet = " ".join(slide_text)
+            slides.append(f"SLIDE {i}:\n{snippet}")
+        else:
+            slides.append(f"SLIDE {i}: no visible text; may contain images")
+        if len(slides) >= 10:
+            break
+    return "\n\n".join(slides)
+
+
 def extract_docx_section_hints(file):
     doc = Document(file)
     sections = []
@@ -307,7 +366,7 @@ def check_bullet_formatting(text):
     return bullet_issues
 
 
-def generate_ai_suggestions(text, results):
+def generate_ai_suggestions(text, results, structured_text=None):
     if genai is None:
         return ["Install the google-generativeai package and add it to requirements for Gemini suggestions."]
 
@@ -322,7 +381,7 @@ def generate_ai_suggestions(text, results):
             "Focus on spacing, bullet formatting, indentation, grammar, readability, and placeholder content."
         )
         prompt_text = (
-            f"Document text:\n{text[:2000]}\n\nDetected issues:\n"
+            f"Labeled document text:\n{(structured_text or text)[:4000]}\n\nDetected issues:\n"
             f"Missing keywords: {results['Missing Brand Keywords']}\n"
             f"Forbidden words: {results['Forbidden Words Found']}\n"
             f"Grammar issues: {results['Grammar Issues']}\n"
@@ -330,8 +389,9 @@ def generate_ai_suggestions(text, results):
             f"Average sentence length: {results['Average Sentence Length']}\n"
             f"Bullet formatting issues: {results.get('Bullet Formatting Details')}\n\n"
             f"Document context: {results.get('Document Context', 'No context available')}\n"
-            "If this is a PPTX file, mention the slide number for each recommendation. "
-            "If this is a DOCX or PDF file, mention the page or section where the issue occurs."
+            "Use the labeled text above to identify where each issue occurs. "
+            "For PPTX, cite slide numbers. For PDF, cite page numbers. For DOCX, cite headings or sections. "
+            "Do not only give a list of fixes in order; instead, assign each issue to a location."
         )
 
         model = get_secret("GOOGLE_GEMINI_MODEL") or "gemini-flash-latest"
@@ -513,14 +573,20 @@ if uploaded_files:
                 text = extract_text_from_docx(uploaded_file)
                 uploaded_file.seek(0)
                 location_hints = extract_docx_section_hints(uploaded_file)
+                uploaded_file.seek(0)
+                structured_text = extract_structured_text_from_docx(uploaded_file)
             elif extension == 'pdf':
                 text = extract_text_from_pdf(uploaded_file)
                 uploaded_file.seek(0)
                 location_hints = extract_pdf_page_hints(uploaded_file)
+                uploaded_file.seek(0)
+                structured_text = extract_structured_text_from_pdf(uploaded_file)
             elif extension == 'pptx':
                 text = extract_text_from_pptx(uploaded_file)
                 uploaded_file.seek(0)
                 location_hints = extract_pptx_slide_hints(uploaded_file)
+                uploaded_file.seek(0)
+                structured_text = extract_structured_text_from_pptx(uploaded_file)
             else:
                 st.warning(f"Unsupported file: {filename}")
                 continue
@@ -542,7 +608,7 @@ if uploaded_files:
             results['Feedback'] = generate_feedback(results)
             results['Compliance Score'] = calculate_score(results)
             results['Status'] = determine_status(results['Compliance Score'])
-            results['AI Suggestions'] = generate_ai_suggestions(text, results)
+            results['AI Suggestions'] = generate_ai_suggestions(text, results, structured_text)
             results_list.append(results)
 
         except Exception as e:
