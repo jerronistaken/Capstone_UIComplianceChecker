@@ -379,6 +379,7 @@ def generate_ai_suggestions(text, results, structured_text=None):
         summary = (
             "Review the following document text and the detected issues, then provide concise improvement suggestions. "
             "Focus on spacing, bullet formatting, indentation, grammar, readability, and placeholder content."
+            "In the event of too many grammar issues, to the point where you suspect OCR errors, do not leave any feedback about grammar. Instead, focus on formatting and placeholder content."
         )
         prompt_text = (
             f"Labeled document text:\n{(structured_text or text)[:4000]}\n\nDetected issues:\n"
